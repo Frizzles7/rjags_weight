@@ -1,0 +1,230 @@
+---
+title: "rjags_weight_summary"
+author: "Frizzles7"
+date: "1/11/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Problem Description
+
+We will look at the following example problem to investigate the RJAGS package.
+
+Prior studies have shown that weight is linearly related to height.  Can we use height to make predictions regarding weight?
+
+To begin, we will assume that the height of an individual, $Y_i$, is normally distributed with the mean for the individual, $m_i$, modeled as $m_i = a + b * X_i$ and standard deviation s.  We will assume the following priors: $a \sim N(0, 200^2)$, $b \sim N(1, 0.5^2)$, and $s \sim Uniform(0, 20)$.
+
+We will sample 10,000 draws from each of the priors and store these in a dataframe and view plots of these samples.
+
+```{r}
+library(rjags)
+library(dplyr)
+library(ggplot2)
+
+# Sample 10000 draws from each prior
+a <- rnorm(10000, 0, 200)
+b <- rnorm(10000, 1, 0.5)
+s <- runif(10000, 0, 20)
+
+# Store these samples in a dataframe
+samples <- data.frame(set = 1:10000, a, b, s)
+
+# View the head of this dataframe
+head(samples)
+
+# Construct density plots of the prior samples
+ggplot(samples, aes(x = a)) + geom_density()
+ggplot(samples, aes(x = b)) + geom_density()
+ggplot(samples, aes(x = s)) + geom_density()
+```
+
+## Height and Weight Data
+
+We can use physical measurements on height and weight for 507 individuals from the `bdims` dataset in the `openintro` package.  This data can help us to build insights into the relationship between height and weight.
+
+In this dataset, weight in kilograms is recorded in `wgt` and height in centimeters is recorded in `hgt`.
+
+We can look at the relationship between height and weight in this data.
+
+```{r}
+library(openintro)
+
+# View a summary of the bdims data
+summary(bdims)
+
+# Create a scatterplot of height and weight, and include a visualization of the linear relationship
+ggplot(bdims, aes(x = hgt, y = wgt)) + geom_point() + geom_smooth(method = "lm", se = FALSE)
+```
+
+## Define, Compile, and Simulate the Model
+
+Using the priors from above and the observed data from the `bdims` dataset, we can update the posterior model of this relationship.
+
+Priors:
+ - $a \sim N(0, 200^2)$ 
+ - $b \sim N(1, 0.5^2)$
+ - $s \sim Uniform(0, 20)$
+
+Likelihood:
+ - $Y_i \sim N(m_i, s^2)$ where $m_i = a + b * X_i$
+
+```{r}
+# Define the model, including the likelihood and prior models
+weight_model <- "model{
+    # Likelihood model for Y[i]
+    for(i in 1:length(Y)) {
+        Y[i] ~ dnorm(m[i], s^(-2))
+        m[i] <- a + b * X[i]
+    }
+    
+    # Prior models for a, b, s
+    a ~ dnorm(0, 200^(-2))
+    b ~ dnorm(1, 0.5^(-2))
+    s ~ dunif(0, 20)
+    
+}"
+
+# Compile the model
+weight_jags <- jags.model(
+    textConnection(weight_model),
+    data = list(Y = bdims$wgt, X = bdims$hgt),
+    inits = list(.RNG.name = "base::Wichmann-Hill", .RNG.seed = 17)
+)
+
+# Simulate a sample from the posterior
+weight_sim <- coda.samples(
+    model = weight_jags, 
+    variable.names = c("a", "b", "s"), 
+    n.iter = 1000
+)
+
+# Plot the posterior sample
+plot(weight_sim)
+```
+
+## Multiple Chains
+
+To evaluate the quality of a Markov chain simulation, we should look at the stability as the length of the chain increases and the consistency across multiple chains.  Let us review the trace plots for four parallel chains for our model.
+
+```{r}
+# Compile the model with multiple chains
+weight_jags_multi <- jags.model(
+    textConnection(weight_model),
+    data = list(Y = bdims$wgt, X = bdims$hgt),
+    n.chains = 4
+)
+
+# Simulate the sample from the posterior
+weight_sim_multi <- coda.samples(
+    model = weight_jags_multi, 
+    variable.names = c("a", "b", "s"), 
+    n.iter = 1000
+)
+
+# Plot the trace plots and densities for the parallel chains
+plot(weight_sim_multi)
+```
+
+## Longer Chains
+
+Upon reviewing the trace plots for the parallel chains, it appears that these chains are too short.  They have not yet stabilized, so they are unlikely to provide a reliable approximation for the posterior.
+
+We can create a new simulation with more iterations to provide a more reliable approximation for the posterior.
+
+```{r}
+# Simulate a longer chain by increasing the number of iterations
+weight_sim_long <- coda.samples(
+    model = weight_jags, 
+    variable.names = c("a", "b", "s"), 
+    n.iter = 100000
+)
+
+# Plot this longer chain
+plot(weight_sim_long)
+```
+
+## Point Estimates
+
+Using the longer chain, let us look at the posterior means.  We can verify that the summary provides the mean of the posterior values from the chain.
+
+We can also review the mean posterior regression model relative to several of the individual posterior regression models to note the variability.
+
+```{r}
+# Store the chains in a dataframe
+weight_chains_long <- data.frame(weight_sim_long[[1]], iter = 1:100000)
+
+# Review the head of this dataframe
+head(weight_chains_long)
+
+# Review the summary of the simulation
+summary(weight_sim_long)
+
+# Calculate the posterior mean from the dataframe and verify this matches
+mean(weight_chains_long$b)
+
+# Plot the bdims data with the mean regression model
+ggplot(bdims, aes(x = hgt, y = wgt)) + 
+    geom_point() + 
+    geom_abline(intercept = mean(weight_chains_long$a), 
+                slope = mean(weight_chains_long$b), color = "red")
+
+# Compare to a plot of the first 20 posterior regression models
+ggplot(bdims, aes(x = hgt, y = wgt)) + 
+    geom_point() + 
+    geom_abline(intercept = weight_chains_long$a[1:20], 
+                slope = weight_chains_long$b[1:20], color = "orange", size = 0.25)
+```
+
+## Posterior Credible Intervals
+
+Now that we have looked at the posterior mean, let us look at a credible interval for b.  That is, what is the plausible range of posterior slope values.  We can calculate a 95% credible interval for b.
+
+```{r}
+# Calculate the 95% credible interval for b
+ci_b_95 <- quantile(weight_chains_long$b, probs = c(0.025, 0.975))
+ci_b_95
+
+# Plot the values for b and mark the credible interval
+ggplot(weight_chains_long, aes(x = b)) + 
+    geom_density() + 
+    geom_vline(xintercept = ci_b_95, color = "red")
+```
+
+## Calculating Posterior Predictions
+
+Now let us consider that we want to predict weight of a specific individual who is 180 cm tall.
+
+```{r}
+# Calculate m for 180 cm tall individuals.
+weight_chains_long <- weight_chains_long %>%
+    mutate(m_180 = a + b * 180)
+
+# Simulate and store a prediction for each set of parameters
+weight_chains_long <- weight_chains_long %>%
+    mutate(Y_180 = rnorm(n=100000, mean = m_180, sd = s))
+
+# View the head of the dataframe
+head(weight_chains_long)
+
+# Calculate the 95% credible interval for our prediction
+ci_180_95 <- quantile(weight_chains_long$Y_180, probs = c(0.025, 0.975))
+ci_180_95
+
+# Plot the posterior predictions and mark the credible interval
+ggplot(weight_chains_long, aes(x = Y_180)) + 
+    geom_density() + 
+    geom_vline(xintercept = ci_180_95, color = "red")
+
+# Visualize the credible interval on our scatterplot of bdims data
+ggplot(bdims, aes(x = hgt, y = wgt)) + 
+    geom_point() + 
+    geom_abline(intercept = mean(weight_chains_long$a), slope = mean(weight_chains_long$b), color = "red") + 
+    geom_segment(x = 180, xend = 180, y = ci_180_95[[1]], yend = ci_180_95[[2]], color = "purple")
+```
+
+## Summary
+
+We used RJAGS to perform some simple MCMC simulations.  We reviewed the output of these simulations, created several visualizations, investigated point estimates, and calculated credible intervals.
